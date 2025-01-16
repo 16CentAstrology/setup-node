@@ -1,12 +1,14 @@
 import * as core from '@actions/core';
-import * as exec from '@actions/exec';
-import * as installer from './installer';
-import fs from 'fs';
+
+import os from 'os';
+
 import * as auth from './authutil';
 import * as path from 'path';
 import {restoreCache} from './cache-restore';
-import {isGhes, isCacheFeatureAvailable} from './cache-utils';
-import os from 'os';
+import {isCacheFeatureAvailable} from './cache-utils';
+import {getNodejsDistribution} from './distributions/installer-factory';
+import {getNodeVersionFromFile, printEnvDetailsAndSetOutput} from './util';
+import {State} from './constants';
 
 export async function run() {
   try {
@@ -38,7 +40,15 @@ export async function run() {
         (core.getInput('stable') || 'true').toUpperCase() === 'TRUE';
       const checkLatest =
         (core.getInput('check-latest') || 'false').toUpperCase() === 'TRUE';
-      await installer.getNode(version, stable, checkLatest, auth, arch);
+      const nodejsInfo = {
+        versionSpec: version,
+        checkLatest,
+        auth,
+        stable,
+        arch
+      };
+      const nodeDistribution = getNodejsDistribution(nodejsInfo);
+      await nodeDistribution.setupNodeJs();
     }
 
     await printEnvDetailsAndSetOutput();
@@ -50,6 +60,7 @@ export async function run() {
     }
 
     if (cache && isCacheFeatureAvailable()) {
+      core.saveState(State.CachePackageManager, cache);
       const cacheDependencyPath = core.getInput('cache-dependency-path');
       await restoreCache(cache, cacheDependencyPath);
     }
@@ -63,7 +74,7 @@ export async function run() {
       `##[add-matcher]${path.join(matchersPath, 'eslint-compact.json')}`
     );
   } catch (err) {
-    core.setFailed(err.message);
+    core.setFailed((err as Error).message);
   }
 }
 
@@ -87,54 +98,18 @@ function resolveVersionInput(): string {
       versionFileInput
     );
 
-    if (!fs.existsSync(versionFilePath)) {
-      throw new Error(
-        `The specified node version file at: ${versionFilePath} does not exist`
+    const parsedVersion = getNodeVersionFromFile(versionFilePath);
+
+    if (parsedVersion) {
+      version = parsedVersion;
+    } else {
+      core.warning(
+        `Could not determine node version from ${versionFilePath}. Falling back`
       );
     }
-
-    version = installer.parseNodeVersionFile(
-      fs.readFileSync(versionFilePath, 'utf8')
-    );
 
     core.info(`Resolved ${versionFileInput} as ${version}`);
   }
 
   return version;
-}
-
-export async function printEnvDetailsAndSetOutput() {
-  core.startGroup('Environment details');
-
-  const promises = ['node', 'npm', 'yarn'].map(async tool => {
-    const output = await getToolVersion(tool, ['--version']);
-
-    if (tool === 'node') {
-      core.setOutput(`${tool}-version`, output);
-    }
-
-    core.info(`${tool}: ${output}`);
-  });
-
-  await Promise.all(promises);
-
-  core.endGroup();
-}
-
-async function getToolVersion(tool: string, options: string[]) {
-  try {
-    const {stdout, stderr, exitCode} = await exec.getExecOutput(tool, options, {
-      ignoreReturnCode: true,
-      silent: true
-    });
-
-    if (exitCode > 0) {
-      core.warning(`[warning]${stderr}`);
-      return '';
-    }
-
-    return stdout.trim();
-  } catch (err) {
-    return '';
-  }
 }
